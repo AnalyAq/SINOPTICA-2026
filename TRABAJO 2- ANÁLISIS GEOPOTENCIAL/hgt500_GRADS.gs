@@ -1,4 +1,5 @@
 'reinit'
+'cd "C:\Users\ANALY AVALOS\Downloads"
 'set display color white'
 
 
@@ -46,3 +47,4 @@ while (t <= 168)
 
   t = t + 1
 endwhile
+
