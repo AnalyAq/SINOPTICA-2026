@@ -1,0 +1,315 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Feb 13 00:25:46 2026
+
+@author: User
+"""
+
+
+import xarray as xr
+import numpy as np
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import pandas as pd
+from matplotlib.colors import BoundaryNorm
+from matplotlib.animation import FuncAnimation, PillowWriter
+import matplotlib.patches as mpatches
+
+# ============================================================================
+# 1. CARGAR Y ANALIZAR LOS DATOS
+# ============================================================================
+# Cargar dataset
+ds = xr.open_dataset(r"C:\Users\User\Desktop\mapitas\500gt1.nc", engine='netcdf4')
+
+# Usar valid_time como dimensión temporal
+time_dim = 'valid_time'
+
+# Variables
+temp_name = 't'
+height_name = 'z'
+
+# ============================================================================
+# 2. EXTRAER Y PROCESAR VARIABLES
+# ============================================================================
+# Extraer variables
+t = ds[temp_name]
+z = ds[height_name]
+
+# Seleccionar nivel 500 hPa
+level_dim = 'pressure_level'
+try:
+    # Buscar el valor más cercano a 500 hPa
+    pressure_levels = ds[level_dim].values
+   
+    # Encontrar el nivel más cercano a 500 hPa
+    idx_500 = np.argmin(np.abs(pressure_levels - 500))
+    selected_level = pressure_levels[idx_500]
+    
+    # Seleccionar por índice
+    t_500 = t.isel({level_dim: idx_500})
+    z_500 = z.isel({level_dim: idx_500})
+   
+    
+except Exception as e:
+    print(f"Error seleccionando nivel: {e}")
+    # Si falla, usar el primer nivel
+    t_500 = t.isel({level_dim: 0})
+    z_500 = z.isel({level_dim: 0})
+    
+# ============================================================================
+# 3. DEFINIR REGIÓN DE INTERÉS (SUDAMÉRICA)
+# ============================================================================
+lat_min, lat_max = -60, 20      # Latitud: desde -60°S hasta 20°N
+lon_min_sa, lon_max_sa = -120, 10  # Longitud: desde -120°W hasta 10°E
+
+# Coordenadas
+lat_coord = 'latitude'
+lon_coord = 'longitude'
+
+# Convertir longitudes
+def convert_to_0_360(lon):
+    """Convertir longitud de -180..180 a 0..360"""
+    return lon % 360
+
+# Verificar rango de longitudes
+lon_values = t_500[lon_coord].values
+if lon_values.min() < 0:
+    print("✓ Longitudes están en rango -180 a 180")
+    lon_min_360 = convert_to_0_360(lon_min_sa)
+    lon_max_360 = convert_to_0_360(lon_max_sa)
+else:
+    print("✓ Longitudes ya están en rango 0 a 360")
+    lon_min_360 = lon_min_sa % 360
+    lon_max_360 = lon_max_sa % 360
+
+# ============================================================================
+# 4. FUNCIÓN PARA SELECCIONAR REGIÓN
+# ============================================================================
+def select_region(data_var, lat_min, lat_max, lon_min_360, lon_max_360):
+    """Seleccionar región geográfica de interés"""
+    
+    # Verificar orientación de latitud
+    lat_values = data_var[lat_coord].values
+    if lat_values[0] < lat_values[-1]:  # Ascendente
+        lat_slice = slice(lat_min, lat_max)
+    else:  # Descendente
+        lat_slice = slice(lat_max, lat_min)
+    
+    # Caso especial: región cruza el meridiano 0°
+    if lon_min_360 > lon_max_360:
+        # Primera parte: lon_min_360 a 360
+        region1 = data_var.sel(
+            {lat_coord: lat_slice,
+             lon_coord: slice(lon_min_360, 360)}
+        )
+        
+        # Segunda parte: 0 a lon_max_360
+        region2 = data_var.sel(
+            {lat_coord: lat_slice,
+             lon_coord: slice(0, lon_max_360)}
+        )
+        
+        # Combinar las dos partes
+        data_subset = xr.concat([region1, region2], dim=lon_coord)
+    else:
+        # Caso normal
+        data_subset = data_var.sel(
+            {lat_coord: lat_slice,
+             lon_coord: slice(lon_min_360, lon_max_360)}
+        )
+    
+    # Convertir longitudes a -180..180 para graficar si es necesario
+    if data_subset[lon_coord].values.max() > 180:
+        lon_adj = data_subset[lon_coord].values.copy()
+        lon_adj[lon_adj > 180] = lon_adj[lon_adj > 180] - 360
+        data_subset = data_subset.assign_coords({lon_coord: lon_adj})
+        data_subset = data_subset.sortby(lon_coord)
+    
+    return data_subset
+
+# ============================================================================
+# 5. APLICAR SELECCIÓN DE REGIÓN
+# ============================================================================
+t_region = select_region(t_500, lat_min, lat_max, lon_min_360, lon_max_360)
+z_region = select_region(z_500, lat_min, lat_max, lon_min_360, lon_max_360)
+
+# ============================================================================
+# 6. CONVERTIR UNIDADES
+# ============================================================================
+
+# Convertir altura geopotencial de m²/s² a metros geopotenciales
+z_region = z_region / 9.80665
+
+# Convertir temperatura de Kelvin a Celsius
+t_region = t_region - 273.15
+
+# ============================================================================
+# 7. OBTENER INFORMACIÓN DE FECHAS
+# ============================================================================
+# Obtener fechas
+fechas = []
+time_values = t_region[time_dim].values
+for time_val in time_values:
+    fecha_pd = pd.Timestamp(time_val)
+    fechas.append(fecha_pd.strftime('%d %b %H:%M'))
+# ============================================================================
+# 8. CALCULAR NIVELES DE CONTORNO 
+# ============================================================================
+# Para temperatura - simplificar niveles
+t_all_values = t_region.values.flatten()
+t_all_values = t_all_values[~np.isnan(t_all_values)]
+
+if len(t_all_values) > 0:
+    t_min = np.floor(np.nanmin(t_all_values) / 4) * 4
+    t_max = np.ceil(np.nanmax(t_all_values) / 4) * 4
+    levels_t = np.arange(t_min, t_max + 4, 4)  # Cada 4°C
+else:
+    levels_t = np.arange(-40, 10, 4)
+
+# Para altura geopotencial - simplificar niveles
+z_all_values = z_region.values.flatten()
+z_all_values = z_all_values[~np.isnan(z_all_values)]
+
+if len(z_all_values) > 0:
+    z_mean = np.nanmean(z_all_values)
+    z_std = np.nanstd(z_all_values)
+    
+    # Reducir el número de niveles significativamente
+    z_level_min = np.floor((z_mean - 2*z_std) / 40) * 40
+    z_level_max = np.ceil((z_mean + 2*z_std) / 40) * 40
+    levels_z = np.arange(z_level_min, z_level_max + 30, 30)
+    
+    # Si hay demasiados niveles, reducirlos más
+    if len(levels_z) > 20:
+        levels_z = levels_z[::1]  
+else:
+    levels_z = np.arange(5400, 6000, 40)
+
+# ============================================================================
+# 9. CONFIGURAR COLORMAPS 
+# ============================================================================
+cmap_temp = plt.cm.inferno_r
+norm_temp = BoundaryNorm(levels_t, ncolors=cmap_temp.N, clip=True)
+
+# ============================================================================
+# 10. PREPARAR DATOS PARA LA ANIMACIÓN
+# ============================================================================
+# Obtener coordenadas de malla para todos los mapas
+lon = t_region[lon_coord].values
+lat = t_region[lat_coord].values
+lon_grid, lat_grid = np.meshgrid(lon, lat)
+
+# ============================================================================
+# 11. CREAR FIGURA CON ESPACIO PARA TÍTULO GENERAL
+# ============================================================================
+fig = plt.figure(figsize=(16, 12), facecolor='white')
+
+# Ajustar subplot para dejar espacio arriba para el título general
+ax = plt.axes(projection=ccrs.PlateCarree())
+ax.set_extent([lon_min_sa, lon_max_sa, lat_min, lat_max], crs=ccrs.PlateCarree())
+
+# ============================================================================
+# 12. TÍTULO GENERAL 
+# ============================================================================
+fig.suptitle('Isohipsas y Temperatura a 500 hPa\n' +
+             f'Período: {fechas[0]} - {fechas[-1]}',
+             fontsize=16, fontweight='bold', y=0.98)
+
+# ============================================================================
+# 13. FUNCIÓN PARA ACTUALIZAR EL MAPA 
+# ============================================================================
+def actualizar_mapa(frame):
+    
+    # Limpiar el eje completamente
+    ax.clear()
+    
+    # Reconfigurar extensión
+    ax.set_extent([lon_min_sa, lon_max_sa, lat_min, lat_max], crs=ccrs.PlateCarree())
+    
+    # Seleccionar datos para este tiempo
+    t_dia = t_region.isel({time_dim: frame})
+    z_dia = z_region.isel({time_dim: frame})
+    
+    # Obtener datos como arrays 2D
+    t_data = t_dia.values
+    z_data = z_dia.values
+    
+    # ----- CARACTERÍSTICAS GEOGRÁFICAS -----
+    ax.add_feature(cfeature.COASTLINE, linewidth=0.8, zorder=2)
+    ax.add_feature(cfeature.BORDERS, linewidth=0.5, linestyle='--', 
+                  alpha=0.6, edgecolor='gray', zorder=2)
+    ax.add_feature(cfeature.LAND, facecolor='lightgray', alpha=0.1, zorder=1)
+    ax.add_feature(cfeature.OCEAN, facecolor='lightblue', alpha=0.05, zorder=1)
+    
+    # ----- TEMPERATURA (sombreado de fondo) -----
+    im_temp = ax.contourf(lon_grid, lat_grid, t_data,
+                         levels=levels_t,
+                         cmap=cmap_temp,
+                         norm=norm_temp,
+                         transform=ccrs.PlateCarree(),
+                         extend='both',
+                         alpha=0.7,
+                         zorder=0)
+    
+    # ----- ALTURA GEOPOTENCIAL (contornos negros) -----
+    if not np.all(np.isnan(z_data)):
+        # Seleccionar niveles exactamente igual que en el panel
+        if len(levels_z) > 10:
+            plot_levels = levels_z[::2]  # Cada 2 niveles (cada 80m)
+        else:
+            plot_levels = levels_z
+        
+        contours = ax.contour(lon_grid, lat_grid, z_data,
+                             levels=plot_levels,
+                             colors='black',
+                             linewidths=1.5,
+                             transform=ccrs.PlateCarree(),
+                             zorder=3)
+        
+        # Etiquetar contornos 
+        if len(contours.levels) > 0:
+            label_levels = contours.levels[::2]  # Cada 2 niveles
+            ax.clabel(contours, label_levels,
+                     inline=True, fontsize=8,
+                     fmt='%1.0f',
+                     colors='black')
+    
+    # ----- GRIDLINES  -----
+    gl = ax.gridlines(draw_labels=True, linewidth=0.5, color='gray',
+                     alpha=0.5, linestyle=':', zorder=1)
+    gl.top_labels = False
+    gl.right_labels = False
+    gl.left_labels = True
+    gl.bottom_labels = True
+    
+    gl.xlabel_style = {'size': 8, 'color': 'black'}  
+    gl.ylabel_style = {'size': 8, 'color': 'black'}  
+    
+    # ----- TÍTULO DEL SUBPLOT  -----
+    # Usamos el formato SIN año y con letra (a), (b), etc.
+    letras = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)', '(g)', '(h)', '(i)']
+    ax.set_title(f'{letras[frame]} {fechas[frame]}',
+                fontsize=12, fontweight='bold',  
+                loc='left', pad=5, zorder=7)     
+    
+    return ax
+
+# ============================================================================
+# 14. CREAR LA ANIMACIÓN
+# ============================================================================
+# Crear la animación
+anim = FuncAnimation(
+    fig, 
+    actualizar_mapa,
+    frames=len(fechas),
+    interval=1000,  # 1 segundo entre frames
+    repeat=True,
+    repeat_delay=2000,
+    blit=False
+)
+
+# ============================================================================
+# 16. CERRAR EL DATASET
+# ============================================================================
+ds.close()

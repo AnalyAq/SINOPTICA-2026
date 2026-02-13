@@ -1,0 +1,295 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Feb 13 00:29:36 2026
+
+@author: User
+"""
+
+
+
+import xarray as xr
+import numpy as np
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import pandas as pd
+from matplotlib.colors import BoundaryNorm
+from matplotlib.animation import FuncAnimation, PillowWriter
+
+# ============================================================================
+# 1. CARGAR LOS DATOS
+# ============================================================================
+ds = xr.open_dataset(r"C:\Users\User\Desktop\mapitas\8500.nc", engine='netcdf4')
+
+# ============================================================================
+# 2. DIMENSIONES (USANDO LOS NOMBRES EXACTOS DE TU ARCHIVO)
+# ============================================================================
+time_dim = 'valid_time'
+level_dim = 'pressure_level'
+lat_coord = 'latitude'
+lon_coord = 'longitude'
+
+# ============================================================================
+# 3. SELECCIONAR NIVEL DE 850 hPa (ÚNICO NIVEL)
+# ============================================================================
+selected_level = 850  # NIVEL CORREGIDO: 850 hPa
+
+# Seleccionar el nivel de 850 hPa por valor
+q_sel = ds.q.sel({level_dim: selected_level})
+u_sel = ds.u.sel({level_dim: selected_level})
+v_sel = ds.v.sel({level_dim: selected_level})
+# ============================================================================
+# 4. DEFINIR REGIÓN DE INTERÉS (SUDAMÉRICA)
+# ============================================================================
+lat_min, lat_max = -60, 20
+# Para longitudes en formato 0-360, Sudamérica está entre:
+lon_min_360 = 240  # 120°W = 240° en sistema 0-360
+lon_max_360 = 330  # 30°W = 330° en sistema 0-360
+lon_min_plot, lon_max_plot = -120, -30  # Para graficar en -180 a 180
+# ============================================================================
+# 5. SELECCIONAR REGIÓN (MANEJANDO LATITUD DESCENDENTE Y LONGITUD 0-360)
+# ============================================================================
+# Para latitud descendente (de 90 a -90)
+lat_slice = slice(lat_max, lat_min)  # Invertido porque es descendente
+lon_slice = slice(lon_min_360, lon_max_360)
+
+# Seleccionar región
+q_region = q_sel.sel({lat_coord: lat_slice, lon_coord: lon_slice})
+u_region = u_sel.sel({lat_coord: lat_slice, lon_coord: lon_slice})
+v_region = v_sel.sel({lat_coord: lat_slice, lon_coord: lon_slice})
+# ============================================================================
+# 6. VERIFICAR DATOS
+# ============================================================================
+# Humedad específica
+q_values = q_region.values
+
+# Viento
+u_values = u_region.values
+v_values = v_region.values
+# ============================================================================
+# 7. CONVERTIR LONGITUDES PARA GRAFICAR (DE 0-360 A -180-180)
+# ============================================================================
+# Obtener longitudes en 0-360
+lon_360 = q_region[lon_coord].values
+
+# Convertir a -180-180
+lon_180 = lon_360.copy()
+lon_180[lon_180 > 180] = lon_180[lon_180 > 180] - 360
+
+# Reasignar coordenadas
+q_region = q_region.assign_coords({lon_coord: lon_180})
+u_region = u_region.assign_coords({lon_coord: lon_180})
+v_region = v_region.assign_coords({lon_coord: lon_180})
+
+# Ordenar por longitud
+q_region = q_region.sortby(lon_coord)
+u_region = u_region.sortby(lon_coord)
+v_region = v_region.sortby(lon_coord)
+# ============================================================================
+# 8. FECHAS
+# ============================================================================
+time_values = q_region[time_dim].values
+fechas = [pd.Timestamp(t).strftime('%d %b %H:%M') for t in time_values]
+
+for i, f in enumerate(fechas[:4]):
+    print(f"  T{i+1}: {f}")
+if len(fechas) > 4:
+    print(f"  ... y {len(fechas)-4} más")
+
+n_tiempos = len(fechas)
+# ============================================================================
+# 9. NIVELES DE CONTORNO PARA HUMEDAD ESPECÍFICA
+# ============================================================================
+# Unidades para humedad específica
+units_hum = "g/kg"
+
+# Calcular niveles basados en los datos (en g/kg para mejor interpretación)
+q_all = q_region.values.flatten() * 1000  # Convertir a g/kg
+q_all = q_all[~np.isnan(q_all)]
+
+if len(q_all) > 0:
+    q_min = np.nanpercentile(q_all, 5)
+    q_max = np.nanpercentile(q_all, 95)
+    
+    # Niveles cada 1-2 g/kg dependiendo del rango
+    step = 2 if (q_max - q_min) > 10 else 1
+    levels_q_gkg = np.arange(max(0, np.floor(q_min/step)*step), 
+                            min(20, np.ceil(q_max/step)*step + step), step)
+    
+    # Convertir niveles de g/kg a kg/kg para el graficado
+    levels_q = levels_q_gkg / 1000.0
+   
+else:
+    levels_q = np.arange(2, 16, 2) / 1000.0  # 2 a 14 g/kg en kg/kg
+# ============================================================================
+# 10. CONFIGURACIÓN DE FLECHAS DE VIENTO
+# ============================================================================
+# Subsampleo - ajusta estos valores 
+step_lon = 22   # Cada 22 puntos en longitud
+step_lat = 16   # Cada 16 puntos en latitud
+scale_factor = 300  # Controla el largo de las flechas
+# ============================================================================
+# 11. PREPARAR DATOS PARA LA ANIMACIÓN
+# ============================================================================
+# Obtener coordenadas de malla
+lon = q_region[lon_coord].values
+lat = q_region[lat_coord].values
+lon_grid, lat_grid = np.meshgrid(lon, lat)
+
+# ============================================================================
+# 12. CREAR FIGURA CON ESPACIO PARA TÍTULO GENERAL
+# ============================================================================
+fig = plt.figure(figsize=(16, 12), facecolor='white')
+ax = plt.axes(projection=ccrs.PlateCarree())
+ax.set_extent([lon_min_plot, lon_max_plot, lat_min, lat_max], crs=ccrs.PlateCarree())
+
+# ============================================================================
+# 13. TÍTULO GENERAL (EXACTAMENTE IGUAL QUE EN EL PANEL)
+# ============================================================================
+plt.suptitle(f'Humedad Específica y Viento en {selected_level} hPa\n' +
+            f'Período: {fechas[0]} - {fechas[-1]}',
+            fontsize=14, fontweight='bold', y=0.98)
+
+# Colormap para humedad específica
+cmap_q = plt.cm.Blues  # Azul para humedad
+norm_q = BoundaryNorm(levels_q, ncolors=cmap_q.N, clip=True)
+
+# Variable para la barra de color
+im_q_global = None
+
+# ============================================================================
+# 14. FUNCIÓN PARA ACTUALIZAR EL MAPA (EXACTAMENTE IGUAL AL PANEL)
+# ============================================================================
+def actualizar_mapa(frame):
+    global im_q_global, ax, fig
+    
+    # Limpiar el eje completamente
+    ax.clear()
+    
+    # Reconfigurar extensión
+    ax.set_extent([lon_min_plot, lon_max_plot, lat_min, lat_max], crs=ccrs.PlateCarree())
+    
+    # Seleccionar tiempo
+    q_dia = q_region.isel({time_dim: frame})
+    u_dia = u_region.isel({time_dim: frame})
+    v_dia = v_region.isel({time_dim: frame})
+    
+    # Coordenadas
+    lon = q_dia[lon_coord].values
+    lat = q_dia[lat_coord].values
+    lon_grid, lat_grid = np.meshgrid(lon, lat)
+    
+    ax.add_feature(cfeature.COASTLINE, linewidth=0.8, edgecolor='black', zorder=5)
+    ax.add_feature(cfeature.BORDERS, linewidth=0.5, linestyle='--', 
+                  alpha=0.6, edgecolor='gray', zorder=5)
+    ax.add_feature(cfeature.LAND, facecolor='lightgray', alpha=0.3, zorder=1)
+    ax.add_feature(cfeature.OCEAN, facecolor='lightblue', alpha=0.2, zorder=1)
+   
+    q_data = q_dia.values
+    im_q = ax.contourf(lon_grid, lat_grid, q_data,
+                      levels=levels_q,
+                      cmap=cmap_q,
+                      norm=norm_q,
+                      transform=ccrs.PlateCarree(),
+                      extend='both',
+                      alpha=0.8,
+                      zorder=2)
+    
+    if im_q_global is None:
+        im_q_global = im_q
+        # Agregar barra de color (IGUAL que en el panel)
+        cbar_ax = fig.add_axes([0.92, 0.15, 0.015, 0.7])
+        cbar = fig.colorbar(im_q_global, cax=cbar_ax, orientation='vertical')
+        cbar.set_label(f'Humedad Específica (g/kg)', fontsize=12, fontweight='bold')
+        cbar.ax.tick_params(labelsize=10)
+        # Formatear ticks a g/kg
+        ticks = cbar.get_ticks()
+        cbar.set_ticks(ticks)
+        cbar.set_ticklabels([f'{t*1000:.0f}' for t in ticks])
+    
+    # ----- FLECHAS DE VIENTO -----
+    if len(lon) > step_lon and len(lat) > step_lat:
+        # Subsamplear
+        lon_sub = lon[::step_lon]
+        lat_sub = lat[::step_lat]
+        lon_sub_grid, lat_sub_grid = np.meshgrid(lon_sub, lat_sub)
+        
+        u_sub = u_dia.values[::step_lat, ::step_lon]
+        v_sub = v_dia.values[::step_lat, ::step_lon]
+        
+        # Calcular magnitud y filtrar vientos débiles
+        mag = np.sqrt(u_sub**2 + v_sub**2)
+        mask = mag > 1.0  # Solo vientos > 1 m/s
+        
+        if np.any(mask):
+            q = ax.quiver(lon_sub_grid[mask], lat_sub_grid[mask],
+                         u_sub[mask], v_sub[mask],
+                         transform=ccrs.PlateCarree(),
+                         color='black',
+                         width=0.003,
+                         scale=scale_factor,
+                         headwidth=3,
+                         headlength=4,
+                         alpha=0.9,
+                         zorder=6)
+            
+            # Flecha de referencia 
+            if frame == 0:
+                ax.quiverkey(q, 0.9, 0.95, 10, '10 m/s',
+                           labelpos='E',
+                           coordinates='axes',
+                           fontproperties={'size': 8, 'weight': 'bold'},
+                           color='black')
+    
+    # ----- CONTORNOS DE HUMEDAD ESPECÍFICA ALTA -----
+    if not np.all(np.isnan(q_data)):
+        # Convertir niveles a g/kg para etiquetas
+        high_q = [l for l in levels_q if l >= 0.008]  # 8 g/kg
+        if len(high_q) > 0:
+            cs = ax.contour(lon_grid, lat_grid, q_data,
+                          levels=high_q[::2],
+                          colors='darkblue',
+                          linewidths=0.8,
+                          linestyles='-',
+                          transform=ccrs.PlateCarree(),
+                          zorder=4)
+            # Etiquetas en g/kg
+            ax.clabel(cs, cs.levels, inline=True, fontsize=6,
+                     fmt=lambda x: f'{x*1000:.0f} g/kg', colors='darkblue')
+    
+    gl = ax.gridlines(draw_labels=True, linewidth=0.5, color='gray',
+                     alpha=0.5, linestyle=':', zorder=3)
+    gl.top_labels = False
+    gl.right_labels = False
+    gl.left_labels = True
+    gl.bottom_labels = True
+    
+    gl.xlabel_style = {'size': 8, 'color': 'black'}
+    gl.ylabel_style = {'size': 8, 'color': 'black'}
+
+    letras = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)', '(g)', '(h)',
+              '(i)', '(j)', '(k)', '(l)']
+    ax.set_title(f'{letras[frame]} {fechas[frame]}',
+                fontsize=11, fontweight='bold',
+                loc='left', pad=5)
+    
+    return ax
+
+# ============================================================================
+# 15. CREAR LA ANIMACIÓN
+# ============================================================================
+# Crear la animación
+anim = FuncAnimation(
+    fig, 
+    actualizar_mapa,
+    frames=n_tiempos,
+    interval=1000,  
+    repeat=True,
+    repeat_delay=2000,  # Pausa de 2 segundos al terminar
+    blit=False
+)
+
+# ============================================================================
+# 17. CERRAR DATASET
+# ============================================================================
+ds.close()

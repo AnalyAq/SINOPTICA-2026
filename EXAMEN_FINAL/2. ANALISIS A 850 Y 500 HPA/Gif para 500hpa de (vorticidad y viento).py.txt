@@ -1,0 +1,348 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Feb 13 00:29:00 2026
+
+@author: User
+"""
+
+
+import xarray as xr
+import numpy as np
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import pandas as pd
+from matplotlib.colors import BoundaryNorm
+from matplotlib.animation import FuncAnimation, PillowWriter
+
+# ============================================================================
+# 1. CARGAR Y ANALIZAR LOS DATOS
+# ============================================================================
+# Cargar dataset de vorticidad
+ds_vort = xr.open_dataset(r"C:\Users\User\Desktop\mapitas\vor.nc", engine='netcdf4')
+
+# Cargar dataset de viento (u y v)
+ds_wind = xr.open_dataset(r"C:\Users\User\Desktop\mapitas\uv.nc", engine='netcdf4')
+
+# ============================================================================
+# 2. VERIFICAR VARIABLES DISPONIBLES
+# ============================================================================
+for var in ds_vort.data_vars:
+    attrs = ds_vort[var].attrs
+    long_name = attrs.get('long_name', attrs.get('standard_name', 'sin descripción'))
+    units = attrs.get('units', 'sin unidades')
+    print(f"  • {var}: {long_name} [{units}]")
+
+for var in ds_wind.data_vars:
+    attrs = ds_wind[var].attrs
+    long_name = attrs.get('long_name', attrs.get('standard_name', 'sin descripción'))
+    units = attrs.get('units', 'sin unidades')
+    print(f"  • {var}: {long_name} [{units}]")
+
+# ============================================================================
+# 3. IDENTIFICAR VARIABLES Y DIMENSIONES
+# ============================================================================
+vort_name = 'vo'
+u_name = 'u'
+v_name = 'v'
+level_dim = 'pressure_level'
+time_dim = 'valid_time'
+lat_coord = 'latitude'
+lon_coord = 'longitude'
+# ============================================================================
+# 4. VERIFICAR NIVELES DE PRESIÓN
+# ============================================================================
+# Vorticidad
+pressure_levels_vort = ds_vort[level_dim].values
+idx_500_vort = np.argmin(np.abs(pressure_levels_vort - 500))
+selected_level_vort = pressure_levels_vort[idx_500_vort]
+
+# Viento
+pressure_levels_wind = ds_wind[level_dim].values
+idx_500_wind = np.argmin(np.abs(pressure_levels_wind - 500))
+selected_level_wind = pressure_levels_wind[idx_500_wind]
+# ============================================================================
+# 5. EXTRAER VARIABLES EN 500 hPa
+# ============================================================================
+# Vorticidad
+vo = ds_vort[vort_name]
+vo_500 = vo.isel({level_dim: idx_500_vort})
+
+# Viento
+u = ds_wind[u_name]
+v = ds_wind[v_name]
+u_500 = u.isel({level_dim: idx_500_wind})
+v_500 = v.isel({level_dim: idx_500_wind})
+
+# ============================================================================
+# 6. FILTRAR FECHAS: 19-27 JUNIO 2024, 12:00 UTC
+# ============================================================================
+# Obtener tiempos del dataset de vorticidad
+times_vort = pd.DatetimeIndex(vo_500[time_dim].values)
+
+for i, t in enumerate(times_vort):
+
+# Filtrar fechas específicas
+fecha_inicio = pd.Timestamp('2024-06-19 12:00:00')
+fecha_fin = pd.Timestamp('2024-06-27 12:00:00')
+
+mask_fechas = (times_vort >= fecha_inicio) & (times_vort <= fecha_fin) & (times_vort.hour == 12)
+indices_seleccionados = np.where(mask_fechas)[0]
+
+if len(indices_seleccionados) == 0:
+    
+for i, idx in enumerate(indices_seleccionados[:9]):
+    print(f"  Panel {i+1}: {times_vort[idx]}")
+
+# Limitar a 9 tiempos
+indices_finales = indices_seleccionados[:9]
+n_tiempos = len(indices_finales)
+
+# Seleccionar tiempos específicos - IMPORTANTE: mantener todas las dimensiones
+vo_500_sel = vo_500.isel({time_dim: indices_finales})
+u_500_sel = u_500.isel({time_dim: indices_finales})
+v_500_sel = v_500.isel({time_dim: indices_finales})
+# ============================================================================
+# 7. DEFINIR REGIÓN SUDAMÉRICA
+# ============================================================================
+lat_min, lat_max = -60, 20
+lon_min_sa, lon_max_sa = -120, 10
+
+# ============================================================================
+# 8. FUNCIÓN PARA SELECCIONAR REGIÓN (CORREGIDA)
+# ============================================================================
+def select_region(data_var, lat_min, lat_max, lon_min_sa, lon_max_sa):
+    """Seleccionar región geográfica de interés"""
+    
+    # Convertir longitudes deseadas a 0-360
+    lon_min_360 = lon_min_sa % 360  # -120° -> 240°
+    lon_max_360 = lon_max_sa % 360  # 10° -> 10°
+    
+    print(f"  Longitudes: original {lon_min_sa}° a {lon_max_sa}° → 0-360: {lon_min_360}° a {lon_max_360}°")
+    
+    # Verificar orientación de latitud
+    lat_values = data_var[lat_coord].values
+    if lat_values[0] < lat_values[-1]:
+        lat_slice = slice(lat_min, lat_max)
+    
+    else:
+        lat_slice = slice(lat_max, lat_min)
+        
+    # Seleccionar región - manejo especial para cuando cruza el meridiano
+    try:
+        if lon_min_360 > lon_max_360:
+            print(f"  Caso: cruza el meridiano (240° a 10° vía 360°)")
+            region1 = data_var.sel(
+                {lat_coord: lat_slice,
+                 lon_coord: slice(lon_min_360, 360)}
+            )
+            region2 = data_var.sel(
+                {lat_coord: lat_slice,
+                 lon_coord: slice(0, lon_max_360)}
+            )
+            data_subset = xr.concat([region1, region2], dim=lon_coord)
+            print(f"  Región combinada: {region1.dims} + {region2.dims}")
+        else:
+            print(f"  Caso: normal")
+            data_subset = data_var.sel(
+                {lat_coord: lat_slice,
+                 lon_coord: slice(lon_min_360, lon_max_360)}
+            )
+        
+        # Convertir longitudes a -180..180 para graficar
+        lon_adj = data_subset[lon_coord].values.copy()
+        lon_adj[lon_adj > 180] = lon_adj[lon_adj > 180] - 360
+        data_subset = data_subset.assign_coords({lon_coord: lon_adj})
+        data_subset = data_subset.sortby(lon_coord)
+        
+        return data_subset
+        
+    except Exception as e:
+        print(f"  Error en selección: {e}")
+        # Método alternativo más simple
+        data_subset = data_var.sel(
+            {lat_coord: lat_slice,
+             lon_coord: slice(lon_min_360, lon_max_360)}
+        )
+        return data_subset
+
+# ============================================================================
+# 9. APLICAR SELECCIÓN DE REGIÓN
+# ============================================================================
+vo_region = select_region(vo_500_sel, lat_min, lat_max, lon_min_sa, lon_max_sa)
+u_region = select_region(u_500_sel, lat_min, lat_max, lon_min_sa, lon_max_sa)
+v_region = select_region(v_500_sel, lat_min, lat_max, lon_min_sa, lon_max_sa)
+# ============================================================================
+# 10. CONVERTIR UNIDADES
+# ============================================================================
+# Vorticidad: s^-1 a 10^-5 s^-1
+vo_region = vo_region * 1e5
+vo_region.attrs['units'] = '10^-5 s^-1'
+# ============================================================================
+# 11. OBTENER FECHAS PARA ETIQUETAS
+# ============================================================================
+fechas = []
+for time_val in vo_region[time_dim].values:
+    fecha_pd = pd.Timestamp(time_val)
+    fechas.append(fecha_pd.strftime('%d %b %H:%M'))
+# ============================================================================
+# 12. NIVELES DE VORTICIDAD
+# ============================================================================
+vo_all_values = vo_region.values.flatten()
+vo_all_values = vo_all_values[~np.isnan(vo_all_values)]
+
+if len(vo_all_values) > 0:
+    p95 = np.percentile(np.abs(vo_all_values), 95)
+    vort_limit = np.ceil(p95)
+    vort_limit = max(vort_limit, 10)
+    
+    n_niveles = 13
+    levels_vo = np.linspace(-vort_limit, vort_limit, n_niveles)
+    levels_vo = np.round(levels_vo, 1)
+else:
+    levels_vo = np.arange(-20, 21, 4)
+
+# ============================================================================
+# 13. CONFIGURAR COLORMAP
+# ============================================================================
+cmap_vort = plt.cm.RdBu_r
+norm_vort = BoundaryNorm(levels_vo, ncolors=256, clip=False)
+
+# ============================================================================
+# 14. PREPARAR DATOS PARA LA ANIMACIÓN
+# ============================================================================
+# Obtener coordenadas de malla
+lon = vo_region[lon_coord].values
+lat = vo_region[lat_coord].values
+lon_grid, lat_grid = np.meshgrid(lon, lat)
+
+# ============================================================================
+# 15. CREAR FIGURA CON ESPACIO PARA TÍTULO GENERAL
+# ============================================================================
+fig = plt.figure(figsize=(16, 12), facecolor='white')
+ax = plt.axes(projection=ccrs.PlateCarree())
+ax.set_extent([lon_min_sa, lon_max_sa, lat_min, lat_max], crs=ccrs.PlateCarree())
+
+# ============================================================================
+# 16. TÍTULO GENERAL (EXACTAMENTE IGUAL QUE EN EL PANEL)
+# ============================================================================
+fig.suptitle(f'Vorticidad Relativa y Viento a 500 hPa - Sudamérica\n' +
+             f'ERA5 | Período: {fechas[0]} a {fechas[-1]}',
+             fontsize=16, fontweight='bold', y=0.98)
+
+# Variables para la barra de color
+im_vort_global = None
+
+# Parámetros para las flechas de viento (MISMO que en el panel)
+densidad_flechas = 16
+escala_viento = 300
+grosor_flecha = 0.0025
+
+# ============================================================================
+# 17. FUNCIÓN PARA ACTUALIZAR EL MAPA
+# ============================================================================
+def actualizar_mapa(frame):
+    global im_vort_global, ax, fig
+    
+    # Limpiar el eje completamente
+    ax.clear()
+    
+    # Reconfigurar extensión
+    ax.set_extent([lon_min_sa, lon_max_sa, lat_min, lat_max], crs=ccrs.PlateCarree())
+    
+    # Seleccionar datos para este tiempo
+    vo_dia = vo_region.isel({time_dim: frame})
+    u_dia = u_region.isel({time_dim: frame})
+    v_dia = v_region.isel({time_dim: frame})
+    
+    # Obtener datos como arrays 2D
+    vo_data = vo_dia.values
+    u_data = u_dia.values
+    v_data = v_dia.values
+    
+    # ----- CARACTERÍSTICAS GEOGRÁFICAS -----
+    ax.add_feature(cfeature.COASTLINE, linewidth=0.8, zorder=5)
+    ax.add_feature(cfeature.BORDERS, linewidth=0.5, linestyle='--', 
+                  alpha=0.6, edgecolor='gray', zorder=5)
+    ax.add_feature(cfeature.LAND, facecolor='lightgray', alpha=0.2, zorder=1)
+    ax.add_feature(cfeature.OCEAN, facecolor='lightblue', alpha=0.1, zorder=1)
+    
+    # ----- VORTICIDAD (sombreado de fondo) -----
+    im_vort = ax.contourf(lon_grid, lat_grid, vo_data,
+                         levels=levels_vo,
+                         cmap=cmap_vort,
+                         norm=norm_vort,
+                         transform=ccrs.PlateCarree(),
+                         extend='both',
+                         alpha=0.8,
+                         zorder=2)
+    
+    # Guardar referencia para la barra de color
+    if im_vort_global is None:
+        im_vort_global = im_vort
+        # Agregar barra de color (IGUAL que en el panel)
+        cbar_vort_ax = fig.add_axes([0.92, 0.15, 0.015, 0.7])
+        cbar_vort = fig.colorbar(im_vort_global, cax=cbar_vort_ax, orientation='vertical')
+        cbar_vort.set_label('Vorticidad relativa (×10⁻⁵ s⁻¹) a 500 hPa - ERA5', 
+                           fontsize=12, fontweight='bold')
+        cbar_vort.ax.tick_params(labelsize=10)
+    
+    # ----- FLECHAS DE VIENTO (TODAS NEGRAS) IGUAL -----
+    step = densidad_flechas
+    lon_subsample = lon[::step]
+    lat_subsample = lat[::step]
+    lon_grid_sub, lat_grid_sub = np.meshgrid(lon_subsample, lat_subsample)
+
+    u_sub = u_data[::step, ::step]
+    v_sub = v_data[::step, ::step]
+
+    # Dibujar flechas NEGRAS (EXACTAMENTE IGUAL)
+    barbas = ax.quiver(lon_grid_sub, lat_grid_sub, u_sub, v_sub,
+                  color='black',
+                  width=grosor_flecha,
+                  transform=ccrs.PlateCarree(),
+                  zorder=4,
+                  alpha=0.9,
+                  pivot='middle',
+                  headwidth=3,
+                  headlength=4,
+                  headaxislength=3)
+    
+    # ----- GRIDLINES -----
+    gl = ax.gridlines(draw_labels=True, linewidth=0.5, color='gray',
+                     alpha=0.7, linestyle=':', zorder=1)
+    gl.top_labels = False
+    gl.right_labels = False
+    gl.left_labels = True
+    gl.bottom_labels = True
+    
+    gl.xlabel_style = {'size': 8, 'color': 'black'}
+    gl.ylabel_style = {'size': 8, 'color': 'black'}
+    
+    # ----- TÍTULO DEL SUBPLOT-----
+    letras = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)', '(g)', '(h)', '(i)']
+    ax.set_title(f'{letras[frame]} {fechas[frame]}',
+                fontsize=12, fontweight='bold',
+                loc='left', pad=5, zorder=7)
+    
+    return ax
+
+# ============================================================================
+# 18. CREAR LA ANIMACIÓN
+# ============================================================================
+# Crear la animación
+anim = FuncAnimation(
+    fig, 
+    actualizar_mapa,
+    frames=len(fechas),
+    interval=1000,  # 1 segundo entre frames
+    repeat=True,
+    repeat_delay=2000,  # Pausa de 2 segundos al terminar
+    blit=False
+)
+
+# ============================================================================
+# 20. CERRAR DATASETS
+# ============================================================================
+ds_vort.close()
+ds_wind.close()
